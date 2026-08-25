@@ -5,7 +5,6 @@ from app.logger import get_logger
 
 logger = get_logger()
 
-# Initialize Qdrant client
 if config.QDRANT_URL == ":memory:":
     qdrant_client = QdrantClient(":memory:")
 else:
@@ -33,7 +32,6 @@ def ensure_collection_exists(collection_name: str) -> None:
         )
         logger.info(f"Collection '{collection_name}' created successfully.")
 
-    # Ensure all required payload indexes exist on new or existing collections
     payload_indexes = [
         ("combined", qdrant_models.TextIndexParams(type="text", tokenizer=qdrant_models.TokenizerType.WORD, lowercase=True)),
         ("source_file", qdrant_models.KeywordIndexParams(type="keyword")),
@@ -51,7 +49,6 @@ def ensure_collection_exists(collection_name: str) -> None:
             pass
 
 
-# Attempt collection setup at startup; log a warning on failure instead of crashing.
 try:
     ensure_collection_exists(config.INDEX_NAME)
 except Exception as _e:
@@ -97,7 +94,6 @@ def keyword_search(
             match=qdrant_models.MatchText(text=query),
         )
         if query_filter is not None:
-            # Merge the text condition with any existing must-clauses
             existing_must = list(query_filter.must or [])
             combined_filter = qdrant_models.Filter(must=existing_must + [text_condition])
         else:
@@ -233,7 +229,6 @@ def delete_documents(
         )
 
         if clear_all:
-            # Delete only this user's points
             qdrant_client.delete(
                 collection_name=collection_name,
                 points_selector=qdrant_models.FilterSelector(
