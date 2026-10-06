@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import axios from "axios";
 import "./App.css";
 
@@ -29,6 +29,57 @@ const generateId = () => crypto.randomUUID();
 
 const getTimestamp = () => new Date().toISOString();
 
+/**
+ * Parse a reply string and replace [N] / [N, M] citation markers with
+ * interactive badge spans. Citations are rendered as glowing pills.
+ */
+const formatMessageWithCitations = (text, citations = [], onBadgeClick) => {
+  if (!text) return "";
+
+  // First handle bold markers (**text**), then inline [N] citations
+  const parts = [];
+  // Split on citation patterns like [1], [2], [1,2], [1, 2]
+  const citationRegex = /\[(\d+(?:[,\s]*\d+)*)\]/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = citationRegex.exec(text)) !== null) {
+    // Text before match
+    if (match.index > lastIndex) {
+      const segment = text.slice(lastIndex, match.index);
+      parts.push(...formatBold(segment, `pre-${match.index}`));
+    }
+    // Parse all numbers in this badge group
+    const ids = match[1].split(/[,\s]+/).map(Number).filter(Boolean);
+    parts.push(
+      <span
+        key={`cite-${match.index}`}
+        className="citation-badge"
+        onClick={() => onBadgeClick && onBadgeClick(ids)}
+        title={`View source${ids.length > 1 ? "s" : ""} ${ids.join(", ")}`}
+      >
+        {ids.map((id) => `[${id}]`).join("")}
+      </span>
+    );
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Remaining text
+  if (lastIndex < text.length) {
+    parts.push(...formatBold(text.slice(lastIndex), `tail-${lastIndex}`));
+  }
+
+  return parts.length ? parts : text;
+};
+
+const formatBold = (text, keyPrefix = "") => {
+  if (!text) return [];
+  const tokens = text.split("**");
+  return tokens.map((token, i) =>
+    i % 2 === 1 ? <strong key={`${keyPrefix}-b${i}`}>{token}</strong> : token
+  );
+};
+
 const formatMessage = (text) => {
   if (!text) return "";
   const tokens = text.split("**");
@@ -50,7 +101,120 @@ const formatTime = (isoString) => {
   }
 };
 
+/** A collapsible citations section rendered below assistant messages. */
+const CitationsAccordion = forwardRef(function CitationsAccordion({ citations }, ref) {
+  const [open, setOpen] = useState(false);
+  const [highlightedIds, setHighlightedIds] = useState([]);
+
+  useImperativeHandle(ref, () => ({
+    openAndHighlight(ids) {
+      setOpen(true);
+      setHighlightedIds(ids);
+      // Delay scroll to allow accordion to render
+      setTimeout(() => {
+        const el = document.getElementById(`citation-${ids[0]}`);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }, 120);
+    },
+  }));
+
+  if (!citations || citations.length === 0) return null;
+
+  return (
+    <div className="citations-accordion">
+      <button
+        className="citations-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="16" y1="13" x2="8" y2="13" />
+          <line x1="16" y1="17" x2="8" y2="17" />
+          <polyline points="10 9 9 9 8 9" />
+        </svg>
+        Sources Cited ({citations.length})
+        <svg
+          className={`citations-chevron ${open ? "open" : ""}`}
+          width="12" height="12" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="citations-list">
+          {citations.map((c) => (
+            <div
+              key={c.id}
+              className={`citation-card ${highlightedIds?.includes(c.id) ? "highlighted" : ""}`}
+              id={`citation-${c.id}`}
+            >
+              <div className="citation-card-header">
+                <span className="citation-index">[{c.id}]</span>
+                <span className="citation-filename">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: 4}}>
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                  </svg>
+                  {c.source_file}
+                </span>
+                {c.page_number && (
+                  <span className="citation-page">Page {c.page_number}</span>
+                )}
+                <span className="citation-score" title="Relevance score">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" style={{marginRight: 3}}>
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                  </svg>
+                  {(c.score * 1000).toFixed(1)}
+                </span>
+              </div>
+              <p className="citation-snippet">&ldquo;{c.snippet}&rdquo;</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
 const THEME_KEY = "synapse_theme";
+
+/** Wrapper component for a single chat message so hooks can be used safely per-message. */
+function MessageItem({ msg, isUser }) {
+  const accordionRef = useRef(null);
+
+  const handleBadgeClick = (ids) => {
+    // Open accordion first, then scroll after a short delay for layout
+    if (accordionRef.current) {
+      accordionRef.current.openAndHighlight(ids);
+    }
+  };
+
+  return (
+    <div className={`chat-item ${isUser ? "user" : "bot"}`}>
+      <div className="chat-tag">{isUser ? "User" : "Synapse"}</div>
+      <div className={`chat-bubble ${isUser ? "user" : "bot"}`}>
+        <div className="msg-text">
+          {isUser
+            ? formatMessage(msg.content)
+            : formatMessageWithCitations(msg.content, msg.citations, handleBadgeClick)
+          }
+        </div>
+        <span className="bubble-timestamp">{formatTime(msg.timestamp)}</span>
+      </div>
+      {!isUser && msg.citations && msg.citations.length > 0 && (
+        <CitationsAccordion
+          ref={accordionRef}
+          citations={msg.citations}
+        />
+      )}
+    </div>
+  );
+}
+
 
 function App() {
   const [query, setQuery] = useState("");
@@ -154,6 +318,7 @@ function App() {
       role: "assistant",
       content: "",
       timestamp: getTimestamp(),
+      citations: [],
     };
 
     setMessages([...apiMessages, botMessage]);
@@ -167,6 +332,7 @@ function App() {
       );
 
       const botReply = response.data.reply || "No response from server.";
+      const responseCitations = response.data.citations || [];
 
       await streamResponse(botReply, (partialText) => {
         setMessages((prev) => {
@@ -174,6 +340,7 @@ function App() {
           updated[updated.length - 1] = {
             ...updated[updated.length - 1],
             content: partialText,
+            citations: responseCitations,
           };
           return updated;
         });
@@ -399,14 +566,9 @@ function App() {
           {messages.length > 0 &&
             messages.map((msg) => {
               const isUser = msg.role === "user";
+              // Each bot message gets its own accordion that manages its own highlight state
               return (
-                <div key={msg.id} className={`chat-item ${isUser ? "user" : "bot"}`}>
-                  <div className="chat-tag">{isUser ? "User" : "Synapse"}</div>
-                  <div className={`chat-bubble ${isUser ? "user" : "bot"}`}>
-                    <div className="msg-text">{formatMessage(msg.content)}</div>
-                    <span className="bubble-timestamp">{formatTime(msg.timestamp)}</span>
-                  </div>
-                </div>
+                <MessageItem key={msg.id} msg={msg} isUser={isUser} />
               );
             })
           }

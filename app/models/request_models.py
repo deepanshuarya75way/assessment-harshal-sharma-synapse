@@ -43,3 +43,13 @@ class ChatRequest(BaseModel):
             "so users only see context from their own uploaded documents."
         ),
     )
+
+
+class Citation(BaseModel):
+    """Metadata for a single source chunk used in generating the LLM reply."""
+    id: int = Field(..., description="1-based citation index referenced in the reply as [N].")
+    source_file: str = Field(..., description="Filename of the source document.")
+    page_number: int | None = Field(None, description="Page number within the source document (1-indexed).")
+    chunk_index: int | None = Field(None, description="Global chunk index within the ingested document.")
+    snippet: str = Field(..., description="Short excerpt of the chunk text used for context.")
+    score: float = Field(..., description="RRF fusion relevance score of this chunk.")

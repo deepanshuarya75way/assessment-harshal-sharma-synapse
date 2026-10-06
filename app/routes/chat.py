@@ -4,7 +4,7 @@ from app.auth import require_api_key, get_current_user_id
 from app import config
 from app.config import LOW_CONFIDENCE_THRESHOLD, MAX_CONTEXT_DOCS
 from app.logger import get_logger
-from app.models.request_models import ChatRequest
+from app.models.request_models import ChatRequest, Citation
 from app.services.fusion_service import rrf_fusion
 from app.services.llm_service import call_llm
 from app.services.search_service import run_search
@@ -55,19 +55,43 @@ def chat(
 
         MAX_CONTEXT_CHARS = 8000
         context_blocks = []
+        citations: list[Citation] = []
         accumulated_len = 0
 
         for i, hit in enumerate(top_hits):
-            combined_text = (
-                hit.get("source", {}).get("combined", "").replace("<br>", "\n").strip()
-            )
+            source = hit.get("source", {})
+            combined_text = source.get("combined", "").replace("<br>", "\n").strip()
             if not combined_text:
                 continue
-            block = f"Document {i + 1}:\n{combined_text}"
+
+            citation_id = len(citations) + 1
+            source_file = source.get("source_file", "unknown")
+            page_number = source.get("page_number")          # may be None for old chunks
+            chunk_index = source.get("chunk_index")
+            score = hit.get("score", 0.0)
+
+            # Build the labeled context block for the LLM
+            page_label = f", Page {page_number}" if page_number else ""
+            block = (
+                f"[Source {citation_id}] (File: {source_file}{page_label}):\n"
+                f"{combined_text}"
+            )
             if accumulated_len + len(block) > MAX_CONTEXT_CHARS and context_blocks:
                 break
+
             context_blocks.append(block)
             accumulated_len += len(block)
+
+            # Build the citation object (snippet = first 300 chars)
+            snippet = combined_text[:300].rstrip() + ("…" if len(combined_text) > 300 else "")
+            citations.append(Citation(
+                id=citation_id,
+                source_file=source_file,
+                page_number=page_number,
+                chunk_index=chunk_index,
+                snippet=snippet,
+                score=round(score, 6),
+            ))
 
         retrieved_context = "\n\n".join(context_blocks)
 
@@ -79,7 +103,10 @@ def chat(
         chat_history.append({"role": "user", "content": user_query})
 
         system_prompt = (
-            "Answer using only the provided context. Do not hallucinate.\n\n"
+            "Answer using only the provided context below. Do not hallucinate or add information "
+            "not present in the sources.\n"
+            "When you state a fact derived from a source, cite it immediately using bracket notation "
+            "like [1] or [2], matching the [Source N] numbers in the context.\n\n"
             f"Context:\n{retrieved_context}"
         )
 
@@ -96,6 +123,7 @@ def chat(
             "llm_called": True,
             "hits_used": len(context_blocks),
             "max_score": max_score,
+            "citations": [c.model_dump() for c in citations],
         }
 
     except HTTPException:

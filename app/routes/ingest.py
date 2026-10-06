@@ -12,7 +12,7 @@ from app.config import INDEX_NAME, INGEST_BATCH_SIZE
 from app.logger import get_logger
 from app.services.embedding_service import get_embeddings_batch
 from app.services.qdrant_service import ensure_collection_exists, qdrant_client
-from app.services.text_processor import chunk_text, extract_text_from_bytes
+from app.services.text_processor import chunk_pages, extract_text_from_bytes, extract_pages_from_bytes
 
 router = APIRouter()
 logger = get_logger()
@@ -52,15 +52,16 @@ async def ingest_pdf(
 
     logger.info(f"[INGEST] Processing: {file.filename} ({len(raw_bytes):,} bytes)")
 
-    text = extract_text_from_bytes(raw_bytes)
+    pages = extract_pages_from_bytes(raw_bytes)
+    text = "\n\n".join(p["text"] for p in pages)
     if not text.strip():
         raise HTTPException(
             status_code=422,
             detail="No extractable text found. Scanned or image-only PDFs are not supported without OCR.",
         )
 
-    chunks = chunk_text(text)
-    logger.info(f"[INGEST] {len(chunks)} chunks generated from '{file.filename}'.")
+    chunk_dicts = chunk_pages(pages)
+    logger.info(f"[INGEST] {len(chunk_dicts)} chunks generated from '{file.filename}'.")
 
     loop = asyncio.get_running_loop()
     try:
@@ -73,16 +74,17 @@ async def ingest_pdf(
     ingested_at = datetime.now(timezone.utc).isoformat()
 
     batches = [
-        (batch_start, chunks[batch_start : batch_start + INGEST_BATCH_SIZE])
-        for batch_start in range(0, len(chunks), INGEST_BATCH_SIZE)
+        (batch_start, chunk_dicts[batch_start : batch_start + INGEST_BATCH_SIZE])
+        for batch_start in range(0, len(chunk_dicts), INGEST_BATCH_SIZE)
     ]
     sem = asyncio.Semaphore(4)
 
-    async def process_batch(batch_start: int, batch: list[str]):
+    async def process_batch(batch_start: int, batch: list[dict]):
         async with sem:
             try:
+                texts = [c["text"] for c in batch]
                 vectors: list[list[float]] = await loop.run_in_executor(
-                    None, partial(get_embeddings_batch, batch)
+                    None, partial(get_embeddings_batch, texts)
                 )
                 return (batch_start, batch, vectors, None)
             except Exception as e:
@@ -95,8 +97,8 @@ async def ingest_pdf(
         if error or not vectors:
             failed_batches.append({"batch_start": batch_start, "error": error or "Empty vectors"})
             continue
-        for i, (chunk, vector) in enumerate(zip(batch, vectors)):
-            chunk_index = batch_start + i
+        for i, (chunk_dict, vector) in enumerate(zip(batch, vectors)):
+            chunk_index = chunk_dict["chunk_index"]
             point_id = str(
                 uuid.uuid5(
                     uuid.NAMESPACE_DNS,
@@ -108,10 +110,12 @@ async def ingest_pdf(
                     id=point_id,
                     vector=vector,
                     payload={
-                        "combined": chunk,
+                        "combined": chunk_dict["text"],
                         "source_file": os.path.basename(file.filename or ""),
                         "ingested_at": ingested_at,
                         "user_id": user_id,
+                        "page_number": chunk_dict["page_number"],
+                        "chunk_index": chunk_index,
                     },
                 )
             )
