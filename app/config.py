@@ -18,7 +18,7 @@ HF_EMBEDDING_API_URL = os.environ.get(
 )
 
 
-HF_LLM_MODEL = os.environ.get("HF_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+HF_LLM_MODEL = os.environ.get("HF_LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
